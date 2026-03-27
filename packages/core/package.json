@@ -1,0 +1,23 @@
+{
+  "name": "@localsearch/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.4.168",
+    "mammoth": "^1.8.0",
+    "xlsx": "^0.18.5",
+    "jszip": "^3.10.1",
+    "sqlite-vec": "^0.1.7",
+    "tiktoken": "^1.0.17"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "@types/bun": "latest",
+    "@types/node": "^20.14.0"
+  }
+}
