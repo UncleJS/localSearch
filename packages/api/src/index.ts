@@ -39,7 +39,20 @@ const app = new Elysia()
   .use(dirsRoute)
   .use(configRoute)
   .use(failuresRoute)
-  .get("/health", () => ({ status: "ok", ts: Date.now() }))
+  .get(
+    "/health",
+    () => ({ status: "ok", ts: Date.now() }),
+    {
+      detail: {
+        tags: ["config"],
+        summary: "Health check",
+        description: `Simple liveness probe for API availability.
+
+Example response:
+{"status":"ok","ts":1711617000000}`,
+      },
+    }
+  )
   .listen(cfg.apiPort);
 
 console.log(

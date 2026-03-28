@@ -65,8 +65,13 @@ export const failuresRoute = new Elysia()
       detail: {
         tags: ["index"],
         summary: "List files that failed to index",
-        description:
-          "Returns all files that failed during indexing, optionally filtered by directory prefix and/or search term. Failures are cleared when a file is successfully re-indexed or deleted.",
+        description: `Returns all files that failed during indexing, optionally filtered by directory prefix and/or search term. Failures are cleared when a file is successfully re-indexed or deleted.
+
+Example request:
+GET /index/failures?dir=/home/user/Documents&search=timeout
+
+Example response:
+{"failures":[{"path":"/home/user/Documents/big.pdf","error":"ingest timed out after 300s","failedAt":"2026-03-28T10:00:00.000Z"}],"total":1}`,
       },
     }
   )
@@ -83,7 +88,10 @@ export const failuresRoute = new Elysia()
       detail: {
         tags: ["index"],
         summary: "Clear all failed-file records",
-        description: "Removes every entry from failed_files. Does not re-index anything.",
+        description: `Removes every entry from failed_files. Does not re-index anything.
+
+Example response:
+{"cleared":23}`,
       },
     }
   )
@@ -147,7 +155,13 @@ export const failuresRoute = new Elysia()
       detail: {
         tags: ["index"],
         summary: "Retry all failed files",
-        description: "Re-ingests every file currently in failed_files. Runs in the background; poll /index/status for progress. Optional timeoutSeconds controls per-file limit (default 300).",
+        description: `Re-ingests every file currently in failed_files. Runs in the background; poll /index/status for progress. Optional timeoutSeconds controls per-file limit (default 300).
+
+Example request:
+POST /index/failures/retry?timeoutSeconds=180
+
+Example response:
+{"started":true,"total":12}`,
       },
     }
   )
@@ -192,7 +206,13 @@ export const failuresRoute = new Elysia()
       detail: {
         tags: ["index"],
         summary: "Retry a single failed file",
-        description: "Re-ingests one file by its URL-encoded path. Optional timeoutSeconds controls the limit (default 300). Clears the failed_files entry on success.",
+        description: `Re-ingests one file by its URL-encoded path. Optional timeoutSeconds controls the limit (default 300). Clears the failed_files entry on success.
+
+Example request:
+POST /index/failures/retry/%2Fhome%2Fuser%2FDocuments%2Fbig.pdf?timeoutSeconds=180
+
+Example response:
+{"path":"/home/user/Documents/big.pdf","status":"indexed"}`,
       },
     }
   );

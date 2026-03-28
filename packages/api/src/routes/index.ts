@@ -70,7 +70,16 @@ export const indexRoute = new Elysia()
   .get(
     "/index/status",
     () => getIndexStatus(),
-    { detail: { tags: ["index"], summary: "Get current indexing status" } }
+    {
+      detail: {
+        tags: ["index"],
+        summary: "Get current indexing status",
+        description: `Returns live status for background index/rescan jobs, including progress, last result message, and current failed-file count.
+
+Example response:
+{"running":true,"startedAt":"2026-03-28T10:00:00.000Z","operation":"index","progress":{"current":42,"total":300},"failureCount":2}`,
+      },
+    }
   )
 
   // ── POST /index ────────────────────────────────────────────────────────────
@@ -132,7 +141,17 @@ export const indexRoute = new Elysia()
         path: t.String({ description: "File or directory path to index" }),
         recursive: t.Optional(t.Boolean({ description: "Recurse into subdirectories (default: true)" })),
       }),
-      detail: { tags: ["index"], summary: "Index a file or directory" },
+      detail: {
+        tags: ["index"],
+        summary: "Index a file or directory",
+        description: `Starts background indexing for the given path. Supports single files or directories. Progress can be tracked via GET /index/status.
+
+Example request body:
+{"path":"/home/user/Documents","recursive":true}
+
+Example response:
+{"started":true,"total":427}`,
+      },
     }
   )
 
@@ -171,7 +190,16 @@ export const indexRoute = new Elysia()
 
       return { started: true };
     },
-    { detail: { tags: ["index"], summary: "Rescan all watched directories for new/changed/deleted files" } }
+    {
+      detail: {
+        tags: ["index"],
+        summary: "Rescan all watched directories for new/changed/deleted files",
+        description: `Starts a background drift scan across watched roots to index new/modified files and remove deleted ones from the index.
+
+Example response:
+{"started":true}`,
+      },
+    }
   )
 
   // ── DELETE /index/:docId ───────────────────────────────────────────────────
@@ -192,6 +220,16 @@ export const indexRoute = new Elysia()
     },
     {
       params: t.Object({ docId: t.Numeric() }),
-      detail: { tags: ["index"], summary: "Remove a document from the index" },
+      detail: {
+        tags: ["index"],
+        summary: "Remove a document from the index",
+        description: `Deletes one indexed document by ID, including its chunks and vector/FTS records via relational cleanup.
+
+Example request:
+DELETE /index/42
+
+Example response:
+{"message":"Document removed from index","path":"/home/user/Documents/report.pdf"}`,
+      },
     }
   );

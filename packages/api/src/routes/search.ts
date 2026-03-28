@@ -32,6 +32,16 @@ export const searchRoute = new Elysia({ prefix: "/search" }).get(
         t.Numeric({ minimum: 1, maximum: 50, description: "Max results" })
       ),
     }),
-    detail: { tags: ["rag"], summary: "Semantic search (no LLM, returns chunks)" },
+    detail: {
+      tags: ["rag"],
+      summary: "Semantic search (no LLM, returns chunks)",
+      description: `Runs hybrid retrieval (vector + BM25 fusion) and returns matching chunk metadata and excerpts without generating an LLM answer.
+
+Example request:
+GET /search?q=budget+variance&limit=5
+
+Example response:
+{"query":"budget variance","count":2,"results":[{"chunkId":123,"docId":7,"path":"/docs/report.pdf","title":"report.pdf","page":4,"excerpt":"...","score":0.03}]}`,
+    },
   }
 );

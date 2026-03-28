@@ -38,7 +38,14 @@ export const dirsRoute = new Elysia({ prefix: "/dirs" })
       };
     },
     {
-      detail: { tags: ["index"], summary: "List all watched directories" },
+      detail: {
+        tags: ["index"],
+        summary: "List all watched directories",
+        description: `Returns all watched root directories with aggregate document and chunk counts for each root.
+
+Example response:
+{"total":1,"dirs":[{"id":1,"path":"/home/user/Documents","docCount":423,"chunkCount":11234,"addedAt":"2026-03-28T10:00:00.000Z"}]}`,
+      },
     }
   )
   .delete(
@@ -78,6 +85,16 @@ export const dirsRoute = new Elysia({ prefix: "/dirs" })
       body: t.Object({
         path: t.String({ description: "Directory path to remove from index" }),
       }),
-      detail: { tags: ["index"], summary: "Remove a watched directory and all its documents" },
+      detail: {
+        tags: ["index"],
+        summary: "Remove a watched directory and all its documents",
+        description: `Stops watching the directory, removes its watched entry, and deletes all indexed documents/chunks under that path prefix.
+
+Example request body:
+{"path":"/home/user/Documents/old-archive"}
+
+Example response:
+{"message":"Removed directory from index","path":"/home/user/Documents/old-archive","documentsRemoved":128}`,
+      },
     }
   );

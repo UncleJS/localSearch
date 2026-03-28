@@ -184,6 +184,20 @@ export const queryRoute = new Elysia({ prefix: "/query" }).post(
       ),
       topK: t.Optional(t.Number({ minimum: 1, maximum: GLOBAL_MAX_TOP_K, description: "Number of chunks to retrieve" })),
     }),
-    detail: { tags: ["rag"], summary: "Ask a question (RAG, streaming SSE)" },
+    detail: {
+      tags: ["rag"],
+      summary: "Ask a question (RAG, streaming SSE)",
+      description: `Retrieves relevant chunks, builds a bounded prompt, and streams answer tokens over SSE.
+
+Example request body:
+{"question":"What is n8n?","mode":"balanced","topK":4}
+
+SSE event sequence:
+{"type":"status","message":"Searching documents..."}
+{"type":"status","message":"Generating answer..."}
+{"type":"token","content":"..."}
+{"type":"citations","citations":[...]}
+data: [DONE]`,
+    },
   }
 );

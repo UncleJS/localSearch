@@ -101,6 +101,16 @@ export const docsRoute = new Elysia({ prefix: "/docs" }).get(
       limit: t.Optional(t.Numeric({ minimum: 1, maximum: 1000 })),
       search: t.Optional(t.String({ description: "Filter by path or title (case-insensitive substring)" })),
     }),
-    detail: { tags: ["index"], summary: "List all indexed documents" },
+    detail: {
+      tags: ["index"],
+      summary: "List all indexed documents",
+      description: `Returns paginated indexed documents with chunk counts and timestamps. Optional search filters by title/path substring.
+
+Example request:
+GET /docs?page=1&limit=20&search=budget
+
+Example response:
+{"total":73,"page":1,"limit":20,"search":"budget","documents":[{"id":9,"path":"/docs/budget.xlsx","title":"budget.xlsx","chunkCount":14,"indexedAt":"2026-03-28T10:00:00.000Z","modifiedAt":"2026-03-27T18:42:00.000Z"}]}`,
+    },
   }
 );
