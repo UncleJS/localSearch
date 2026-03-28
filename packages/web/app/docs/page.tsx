@@ -42,6 +42,41 @@ interface IndexStatus {
 
 type Tab = "indexed" | "failed";
 
+interface FailureGroup {
+  key: string;
+  label: string;
+  files: FailedFile[];
+}
+
+function clampMinutes(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(999, Math.round(value)));
+}
+
+function getFailureGroupMeta(error: string): Pick<FailureGroup, "key" | "label"> {
+  const raw = error.replace(/^Error:\s*/i, "").replace(/\s+/g, " ").trim();
+  const lower = raw.toLowerCase();
+
+  if (lower.includes("timed out")) {
+    return { key: "timeout", label: "Timed out" };
+  }
+
+  if (
+    lower.includes("no extractable text") ||
+    lower.includes("image-only pdf") ||
+    lower.includes("ocr is not supported")
+  ) {
+    return { key: "scanned-pdf", label: "Scanned / image-only PDF" };
+  }
+
+  if (lower.includes("unsupported file type")) {
+    return { key: "unsupported-file-type", label: "Unsupported file type" };
+  }
+
+  const label = raw.length > 60 ? `${raw.slice(0, 57)}…` : raw || "Unknown error";
+  return { key: `error:${label.toLowerCase()}`, label };
+}
+
 export default function DocsPage() {
   const [activeTab, setActiveTab] = useState<Tab>("indexed");
 
@@ -61,6 +96,15 @@ export default function DocsPage() {
   const [failuresSearchInput, setFailuresSearchInput] = useState("");
   const failuresSearchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [retryingPath, setRetryingPath] = useState<string | null>(null);
+  const [retryingGroupKey, setRetryingGroupKey] = useState<string | null>(null);
+  const [retryingGroupProgress, setRetryingGroupProgress] = useState<{ key: string; current: number; total: number } | null>(null);
+  // Global timeout (minutes) applied to Retry all and per-row Retry
+  const [retryTimeoutMins, setRetryTimeoutMins] = useState(5);
+  const [retryGroupTimeouts, setRetryGroupTimeouts] = useState<Record<string, number>>({});
+  // Per-row timeout overrides (path → minutes); falls back to retryTimeoutMins
+  const [retryTimeouts, setRetryTimeouts] = useState<Record<string, number>>({});
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [selectedFailureGroupFilter, setSelectedFailureGroupFilter] = useState<string>("all");
 
   // ── Shared ────────────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -249,12 +293,37 @@ export default function DocsPage() {
     finally { setRemovingDoc(null); }
   }
 
-  async function handleRetryFile(path: string) {
+  async function handleRetryFile(path: string, groupKey?: string) {
+    if (anyBusy || retryingPath || retryingGroupKey) return;
     setRetryingPath(path);
+    const mins = retryTimeouts[path] ?? (groupKey ? retryGroupTimeouts[groupKey] : undefined) ?? retryTimeoutMins;
+    const timeoutSeconds = Math.max(1, Math.round(mins * 60));
     try {
-      await fetch(`/api/index/failures/retry/${encodeURIComponent(path)}`, { method: "POST" });
+      await fetch(`/api/index/failures/retry/${encodeURIComponent(path)}?timeoutSeconds=${timeoutSeconds}`, { method: "POST" });
       await fetchFailures(failuresSearch);
+      // Reset per-row timeout back to default after retry
+      setRetryTimeouts((prev) => { const next = { ...prev }; delete next[path]; return next; });
     } finally { setRetryingPath(null); }
+  }
+
+  async function handleRetryGroup(groupKey: string, paths: string[]) {
+    if (paths.length === 0 || anyBusy || retryingPath || retryingGroupKey) return;
+    setRetryingGroupKey(groupKey);
+    setRetryingGroupProgress({ key: groupKey, current: 0, total: paths.length });
+    const mins = retryGroupTimeouts[groupKey] ?? retryTimeoutMins;
+    const timeoutSeconds = Math.max(1, Math.round(mins * 60));
+
+    try {
+      for (let i = 0; i < paths.length; i++) {
+        const path = paths[i];
+        await fetch(`/api/index/failures/retry/${encodeURIComponent(path)}?timeoutSeconds=${timeoutSeconds}`, { method: "POST" });
+        setRetryingGroupProgress({ key: groupKey, current: i + 1, total: paths.length });
+      }
+      await fetchFailures(failuresSearch);
+    } finally {
+      setRetryingGroupKey(null);
+      setRetryingGroupProgress(null);
+    }
   }
 
   async function handleRetryAll() {
@@ -262,8 +331,9 @@ export default function DocsPage() {
     setRescanning(true);
     setIndexResult(null);
     startPolling();
+    const timeoutSeconds = Math.max(1, Math.round(retryTimeoutMins * 60));
     try {
-      const res = await fetch("/api/index/failures/retry", { method: "POST" });
+      const res = await fetch(`/api/index/failures/retry?timeoutSeconds=${timeoutSeconds}`, { method: "POST" });
       const data = await res.json() as { started?: boolean; error?: string; message?: string };
       if (data.error) { setIndexResult(data.error); stopPolling(); setRescanning(false); }
       else if (data.message) { setIndexResult(data.message); stopPolling(); setRescanning(false); await fetchAll(); }
@@ -279,14 +349,115 @@ export default function DocsPage() {
     setExpanded((prev) => { const next = new Set(prev); next.has(path) ? next.delete(path) : next.add(path); return next; });
   }
 
+  function toggleFailureGroup(key: string) {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }
+
+  function expandVisibleFailureGroups() {
+    setExpandedGroups(new Set(visibleFailureGroups.map((group) => group.key)));
+  }
+
+  function collapseAllFailureGroups() {
+    setExpandedGroups(new Set());
+  }
+
   function docsForDir(dirPath: string): Doc[] {
     const prefix = dirPath.endsWith("/") ? dirPath : dirPath + "/";
     return docs.filter((d) => d.path === dirPath || d.path.startsWith(prefix));
   }
 
+  function timeoutForGroup(groupKey: string): number {
+    return retryGroupTimeouts[groupKey] ?? retryTimeoutMins;
+  }
+
+  function timeoutForFile(path: string, groupKey: string): number {
+    return retryTimeouts[path] ?? retryGroupTimeouts[groupKey] ?? retryTimeoutMins;
+  }
+
+  const groupedFailures = Array.from(
+    failures.reduce((map, failure) => {
+      const meta = getFailureGroupMeta(failure.error);
+      const existing = map.get(meta.key);
+      if (existing) {
+        existing.files.push(failure);
+      } else {
+        map.set(meta.key, { ...meta, files: [failure] });
+      }
+      return map;
+    }, new Map<string, FailureGroup>()).values()
+  ).sort((a, b) => b.files.length - a.files.length || a.label.localeCompare(b.label));
+
+  const visibleFailureGroups = selectedFailureGroupFilter === "all"
+    ? groupedFailures
+    : groupedFailures.filter((group) => group.key === selectedFailureGroupFilter);
+
+  useEffect(() => {
+    if (selectedFailureGroupFilter !== "all" && !groupedFailures.some((group) => group.key === selectedFailureGroupFilter)) {
+      setSelectedFailureGroupFilter("all");
+    }
+
+    setExpandedGroups((prev) => {
+      const validKeys = new Set(groupedFailures.map((group) => group.key));
+      const next = new Set(Array.from(prev).filter((key) => validKeys.has(key)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [groupedFailures, selectedFailureGroupFilter]);
+
+  function renderFailureRow(f: FailedFile, groupKey: string, nested = false) {
+    const isRetrying = retryingPath === f.path;
+
+    return (
+      <div
+        key={f.path}
+        className={`flex items-start gap-3 ${nested ? "px-6" : "px-4"} py-3 bg-background hover:bg-amber-500/5 transition-colors group/failure`}
+      >
+        <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm text-foreground font-mono truncate" title={f.path}>{f.path}</p>
+          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+            <span className="text-xs text-amber-400">{f.error}</span>
+            <span className="text-xs text-foreground-muted/50">
+              {new Date(f.failedAt).toLocaleDateString("sv-SE")} {new Date(f.failedAt).toLocaleTimeString("sv-SE")}
+            </span>
+          </div>
+        </div>
+        <div className={`flex items-center gap-1 shrink-0 transition-all ${isRetrying ? "opacity-100" : "opacity-0 group-hover/failure:opacity-100"}`}>
+          <input
+            type="number"
+            min={1}
+            max={999}
+            value={timeoutForFile(f.path, groupKey)}
+            onChange={(e) => setRetryTimeouts((prev) => ({
+              ...prev,
+              [f.path]: clampMinutes(Number(e.target.value) || 1),
+            }))}
+            disabled={isRetrying || anyBusy || !!retryingPath || !!retryingGroupKey}
+            title="Timeout in minutes for this file"
+            className="w-12 bg-background border border-amber-500/30 rounded px-1.5 py-1 text-xs text-foreground text-center focus:outline-none focus:border-amber-500/60 disabled:opacity-40"
+          />
+          <span className="text-xs text-foreground-muted/60">min</span>
+          <button
+            onClick={() => handleRetryFile(f.path, groupKey)}
+            disabled={isRetrying || anyBusy || !!retryingPath || !!retryingGroupKey}
+            title="Retry this file"
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/15 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isRetrying ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const totalDocs = dirs.reduce((s, d) => s + d.docCount, 0);
   const totalChunks = dirs.reduce((s, d) => s + d.chunkCount, 0);
   const anyBusy = indexing || rescanning || indexStatus.running;
+  const failureActionsBusy = anyBusy || !!retryingPath || !!retryingGroupKey;
   const totalPages = Math.max(1, Math.ceil(docsTotal / PAGE_SIZE));
 
   return (
@@ -601,16 +772,29 @@ export default function DocsPage() {
               </div>
               <button
                 onClick={handleRetryAll}
-                disabled={anyBusy || failures.length === 0}
+                disabled={failureActionsBusy || failures.length === 0}
                 title="Retry all failed files"
                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-300 border border-amber-500/40 rounded-lg hover:bg-amber-500/15 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
               >
                 <RotateCcw size={12} />
                 Retry all
               </button>
+              {/* Global timeout input */}
+              <div className="flex items-center gap-1 shrink-0" title="Timeout per file in minutes (applies to Retry all and per-row Retry)">
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={retryTimeoutMins}
+                  onChange={(e) => setRetryTimeoutMins(clampMinutes(Number(e.target.value) || 1))}
+                  disabled={failureActionsBusy}
+                  className="w-14 bg-background border border-border rounded-lg px-2 py-2 text-xs text-foreground text-center focus:outline-none focus:border-amber-500/60 disabled:opacity-40"
+                />
+                <span className="text-xs text-foreground-muted">min</span>
+              </div>
               <button
                 onClick={handleClearFailures}
-                disabled={anyBusy || failures.length === 0}
+                disabled={failureActionsBusy || failures.length === 0}
                 title="Clear all failed file records"
                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-foreground-muted border border-border rounded-lg hover:border-red-400/50 hover:text-red-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
               >
@@ -626,6 +810,57 @@ export default function DocsPage() {
               </p>
             )}
 
+            {retryingGroupProgress && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+                <Loader2 size={12} className="animate-spin" />
+                Retrying group…
+                <span className="tabular-nums">{retryingGroupProgress.current} / {retryingGroupProgress.total}</span>
+              </div>
+            )}
+
+            {!failuresSearch && groupedFailures.length > 0 && (
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setSelectedFailureGroupFilter("all")}
+                    className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${selectedFailureGroupFilter === "all"
+                      ? "border-amber-500/50 bg-amber-500/15 text-amber-300"
+                      : "border-border text-foreground-muted hover:border-amber-500/30 hover:text-foreground"}`}
+                  >
+                    All <span className="tabular-nums">({failures.length})</span>
+                  </button>
+                  {groupedFailures.map((group) => (
+                    <button
+                      key={`filter-${group.key}`}
+                      onClick={() => setSelectedFailureGroupFilter(group.key)}
+                      className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${selectedFailureGroupFilter === group.key
+                        ? "border-amber-500/50 bg-amber-500/15 text-amber-300"
+                        : "border-border text-foreground-muted hover:border-amber-500/30 hover:text-foreground"}`}
+                    >
+                      {group.label} <span className="tabular-nums">({group.files.length})</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={expandVisibleFailureGroups}
+                    disabled={visibleFailureGroups.length === 0}
+                    className="px-2.5 py-1 text-xs rounded-lg border border-border text-foreground-muted hover:border-amber-500/30 hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    onClick={collapseAllFailureGroups}
+                    disabled={visibleFailureGroups.length === 0}
+                    className="px-2.5 py-1 text-xs rounded-lg border border-border text-foreground-muted hover:border-amber-500/30 hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Collapse all
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Failure rows */}
             {failures.length === 0 ? (
               failuresSearch ? (
@@ -639,36 +874,78 @@ export default function DocsPage() {
                   <p>No failed files.</p>
                 </div>
               )
-            ) : (
+            ) : failuresSearch ? (
               <div className="border border-amber-500/30 rounded-xl divide-y divide-amber-500/10 overflow-hidden">
-                {failures.map((f) => (
-                  <div
-                    key={f.path}
-                    className="flex items-start gap-3 px-4 py-3 bg-background hover:bg-amber-500/5 transition-colors group/failure"
-                  >
-                    <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-foreground font-mono truncate" title={f.path}>{f.path}</p>
-                      <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                        <span className="text-xs text-amber-400">{f.error}</span>
-                        <span className="text-xs text-foreground-muted/50">
-                          {new Date(f.failedAt).toLocaleDateString("sv-SE")} {new Date(f.failedAt).toLocaleTimeString("sv-SE")}
+                {failures.map((f) => renderFailureRow(f, getFailureGroupMeta(f.error).key))}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {visibleFailureGroups.map((group) => {
+                  const isOpen = expandedGroups.has(group.key);
+                  const groupBusy = retryingGroupKey === group.key;
+                  const groupTimeout = timeoutForGroup(group.key);
+
+                  return (
+                    <div key={group.key} className="border border-amber-500/30 rounded-xl overflow-hidden">
+                      <div
+                        className="flex items-center gap-3 px-4 py-3 bg-background hover:bg-amber-500/5 transition-colors cursor-pointer"
+                        onClick={() => toggleFailureGroup(group.key)}
+                      >
+                        <span className="text-foreground-muted shrink-0">
+                          {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         </span>
+                        <AlertTriangle size={14} className="text-amber-400 shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-foreground">{group.label}</p>
+                            <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 tabular-nums">
+                              {group.files.length.toLocaleString()}
+                            </span>
+                            {groupBusy && retryingGroupProgress?.key === group.key && (
+                              <span className="text-xs text-amber-300 tabular-nums">
+                                {retryingGroupProgress.current} / {retryingGroupProgress.total}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-foreground-muted">
+                            {group.files.length} file{group.files.length !== 1 ? "s" : ""} with a similar error
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="number"
+                            min={1}
+                            max={999}
+                            value={groupTimeout}
+                            onChange={(e) => setRetryGroupTimeouts((prev) => ({
+                              ...prev,
+                              [group.key]: clampMinutes(Number(e.target.value) || 1),
+                            }))}
+                            disabled={failureActionsBusy}
+                            title="Timeout in minutes for this error group"
+                            className="w-12 bg-background border border-amber-500/30 rounded px-1.5 py-1 text-xs text-foreground text-center focus:outline-none focus:border-amber-500/60 disabled:opacity-40"
+                          />
+                          <span className="text-xs text-foreground-muted/60">min</span>
+                          <button
+                            onClick={() => handleRetryGroup(group.key, group.files.map((f) => f.path))}
+                            disabled={failureActionsBusy}
+                            title="Retry all files in this group"
+                            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/15 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {groupBusy ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+                            Retry group
+                          </button>
+                        </div>
                       </div>
+
+                      {isOpen && (
+                        <div className="divide-y divide-amber-500/10 border-t border-amber-500/10">
+                          {group.files.map((f) => renderFailureRow(f, group.key, true))}
+                        </div>
+                      )}
                     </div>
-                    <button
-                      onClick={() => handleRetryFile(f.path)}
-                      disabled={retryingPath === f.path || anyBusy}
-                      title="Retry this file"
-                      className="opacity-0 group-hover/failure:opacity-100 flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/15 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                    >
-                      {retryingPath === f.path
-                        ? <Loader2 size={11} className="animate-spin" />
-                        : <RotateCcw size={11} />}
-                      Retry
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

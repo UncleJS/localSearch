@@ -91,7 +91,7 @@ export const failuresRoute = new Elysia()
   // ── POST /index/failures/retry ─────────────────────────────────────────────
   .post(
     "/index/failures/retry",
-    () => {
+    ({ query }) => {
       const status = getIndexStatus();
       if (status.running) {
         return { error: "An indexing operation is already in progress", status };
@@ -106,13 +106,31 @@ export const failuresRoute = new Elysia()
         return { started: false, message: "No failed files to retry" };
       }
 
+      const timeoutMs = (query.timeoutSeconds ?? 300) * 1000;
       const paths = rows.map((r) => r.path);
       setRunning("index", paths.length);
 
       (async () => {
         try {
           for (let i = 0; i < paths.length; i++) {
-            await ingestFile(paths[i]);
+            const filePath = paths[i];
+            try {
+              await Promise.race([
+                ingestFile(filePath),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`ingest timed out after ${query.timeoutSeconds ?? 300}s`)), timeoutMs)
+                ),
+              ]);
+            } catch (e) {
+              const error = String(e);
+              console.warn(`[retry-all] timeout/error: ${filePath} — ${error}`);
+              try {
+                db.run(
+                  "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
+                  [filePath, error, Date.now()]
+                );
+              } catch { /* ignore DB errors */ }
+            }
             setProgress(i + 1, paths.length);
           }
         } finally {
@@ -123,10 +141,13 @@ export const failuresRoute = new Elysia()
       return { started: true, total: paths.length };
     },
     {
+      query: t.Object({
+        timeoutSeconds: t.Optional(t.Number({ description: "Per-file ingest timeout in seconds (default 300)", minimum: 1 })),
+      }),
       detail: {
         tags: ["index"],
         summary: "Retry all failed files",
-        description: "Re-ingests every file currently in failed_files. Runs in the background; poll /index/status for progress.",
+        description: "Re-ingests every file currently in failed_files. Runs in the background; poll /index/status for progress. Optional timeoutSeconds controls per-file limit (default 300).",
       },
     }
   )
@@ -134,19 +155,44 @@ export const failuresRoute = new Elysia()
   // ── POST /index/failures/retry/:path ──────────────────────────────────────
   .post(
     "/index/failures/retry/:encodedPath",
-    async ({ params }) => {
+    async ({ params, query }) => {
       const filePath = decodeURIComponent(params.encodedPath);
-      const result = await ingestFile(filePath);
+      const timeoutMs = (query.timeoutSeconds ?? 300) * 1000;
+      const db = getDb();
+
+      let result: Awaited<ReturnType<typeof ingestFile>>;
+      try {
+        result = await Promise.race([
+          ingestFile(filePath),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`ingest timed out after ${query.timeoutSeconds ?? 300}s`)), timeoutMs)
+          ),
+        ]);
+      } catch (e) {
+        const error = String(e);
+        console.warn(`[retry] timeout/error: ${filePath} — ${error}`);
+        try {
+          db.run(
+            "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
+            [filePath, error, Date.now()]
+          );
+        } catch { /* ignore DB errors */ }
+        return { path: filePath, status: "error" as const, error };
+      }
+
       return { path: filePath, status: result.status, error: result.error };
     },
     {
       params: t.Object({
         encodedPath: t.String({ description: "URL-encoded absolute file path" }),
       }),
+      query: t.Object({
+        timeoutSeconds: t.Optional(t.Number({ description: "Ingest timeout in seconds (default 300)", minimum: 1 })),
+      }),
       detail: {
         tags: ["index"],
         summary: "Retry a single failed file",
-        description: "Re-ingests one file by its URL-encoded path. Clears the failed_files entry on success.",
+        description: "Re-ingests one file by its URL-encoded path. Optional timeoutSeconds controls the limit (default 300). Clears the failed_files entry on success.",
       },
     }
   );

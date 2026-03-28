@@ -40,7 +40,8 @@ export async function ingestFile(filePath: string): Promise<IngestResult> {
         "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
         [filePath, result.error ?? "Unknown error", Date.now()]
       );
-    } else if (result.status === "indexed") {
+    } else {
+      // "indexed" or "skipped" — either way the file is clean; remove any stale failure record
       db.run("DELETE FROM failed_files WHERE path = ?", [filePath]);
     }
     return result;
@@ -147,7 +148,7 @@ async function _ingestFile(filePath: string): Promise<IngestResult> {
     db.run(
       `INSERT INTO documents (path, title, hash, mtime, indexed_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [filePath, basename(filePath), hash, stat.mtimeMs, Date.now()]
+      [filePath, basename(filePath), hash, Math.floor(stat.mtimeMs), Date.now()]
     );
 
     const docId = db

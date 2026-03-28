@@ -1,5 +1,5 @@
 import { watch, existsSync, statSync, readdirSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { getDb } from "./db";
 import { ingestFile, isSupportedFile } from "./ingest";
 
@@ -68,7 +68,7 @@ export function watchDir(dir: string) {
   try {
     const w = watch(dir, { recursive: true }, (_event, filename) => {
       if (!filename) return;
-      const filePath = `${dir}/${filename}`;
+      const filePath = resolve(join(dir, filename));
       scheduleReindex(filePath);
     });
 
@@ -226,11 +226,26 @@ export async function scanForMissedFiles(
   const total = allDiskFiles.length;
   let current = 0;
 
+  // Build a per-dir index so we can iterate without re-walking
+  const filesByDir = new Map<string, string[]>();
+  for (const filePath of allDiskFiles) {
+    // Assign each file to the dir it came from
+    for (const dir of dirs) {
+      const prefix = dir.endsWith("/") ? dir : dir + "/";
+      if (filePath === dir || filePath.startsWith(prefix)) {
+        const bucket = filesByDir.get(dir) ?? [];
+        bucket.push(filePath);
+        filesByDir.set(dir, bucket);
+        break;
+      }
+    }
+  }
+
   for (const dir of dirs) {
     if (!existsSync(dir)) continue;
 
     // --- 1. Find files on disk that are new or modified ---
-    const diskFiles = walkDir(dir);
+    const diskFiles = filesByDir.get(dir) ?? [];
 
     for (const filePath of diskFiles) {
       let stat: ReturnType<typeof statSync>;
@@ -255,12 +270,19 @@ export async function scanForMissedFiles(
           result = await Promise.race([
             ingestFile(filePath),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("ingest timed out after 60s")), 60_000)
+              setTimeout(() => reject(new Error("ingest timed out after 300s")), 300_000)
             ),
           ]);
         } catch (e) {
           const error = String(e);
           console.warn(`[scan] timeout/error: ${filePath} — ${error}`);
+          // Write to DB immediately so the file appears in the Failed tab
+          try {
+            db.run(
+              "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
+              [filePath, error, Date.now()]
+            );
+          } catch { /* ignore DB errors */ }
           failed.push({ path: filePath, error });
           current++;
           onProgress?.({ current, total });
@@ -272,6 +294,10 @@ export async function scanForMissedFiles(
           } else if (result.status === "error") {
             console.warn(`[scan] error: ${filePath} — ${result.error}`);
             failed.push({ path: filePath, error: result.error ?? "Unknown error" });
+          } else {
+            // "skipped" for a file not in documents: hash matched a concurrent ingest —
+            // treat as new (it's now in the index) so it's visible in the count
+            newCount++;
           }
         } else {
           if (result.status === "indexed") updatedCount++;
