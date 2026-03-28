@@ -13,13 +13,14 @@ A fully local, privacy-first RAG (Retrieval-Augmented Generation) document searc
 
 - [Features](#features)
 - [Requirements](#requirements)
-- [Quick Start (5 steps)](#quick-start-5-steps)
+- [Quick Start (development, 5 steps)](#quick-start-development-5-steps)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [CLI Usage](#cli-usage)
 - [Web UI](#web-ui)
 - [API Reference](#api-reference)
 - [Query modes (speed vs accuracy)](#query-modes-speed-vs-accuracy)
+- [Runtime environment variables](#runtime-environment-variables)
 - [How it works](#how-it-works)
 - [Supported file formats](#supported-file-formats)
 - [Running as a service](#running-as-a-service)
@@ -59,7 +60,7 @@ A fully local, privacy-first RAG (Retrieval-Augmented Generation) document searc
 
 ---
 
-## Quick Start (5 steps)
+## Quick Start (development, 5 steps)
 
 ```bash
 # 1. Clone and install everything (Ollama + models + dependencies)
@@ -241,77 +242,58 @@ The selected mode is remembered in your browser (`localStorage`) across page rel
 
 ## API Reference
 
-API runs on port `5003`. Interactive docs at: `http://localhost:5003/swagger`
+API runs on port `5003`. Interactive docs: `http://localhost:5003/swagger`.
 
 ```bash
-bun run api        # http://localhost:5003
+bun run api
 ```
 
-### POST `/query` — RAG Q&A (streaming)
+### Endpoint map (current)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/query` | Streaming RAG answer (SSE) |
+| GET | `/search` | Hybrid retrieval only (no LLM answer) |
+| GET | `/index/status` | Background index/rescan progress |
+| POST | `/index` | Start indexing file/directory |
+| POST | `/index/rescan` | Drift scan watched roots |
+| DELETE | `/index/:docId` | Remove indexed document |
+| GET | `/docs` | Paginated indexed documents |
+| GET | `/dirs` | Watched roots + counts |
+| DELETE | `/dirs` | Remove watched root and its docs |
+| GET | `/index/failures` | List failed file ingests |
+| DELETE | `/index/failures` | Clear failure records |
+| POST | `/index/failures/retry` | Retry all failed files |
+| POST | `/index/failures/retry/:encodedPath` | Retry one failed file |
+| GET | `/config` | Read runtime config |
+| PUT | `/config` | Update config |
+| GET | `/health` | Liveness check |
+
+### Common examples
 
 ```bash
+# Streaming RAG query (mode-aware)
 curl -X POST http://localhost:5003/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the main topic?", "mode": "accurate", "topK": 4}'
-```
+  -d '{"question":"What changed this week?","mode":"balanced","topK":4}'
 
-Request body:
-- `question` (required): natural language question
-- `mode` (optional): `fast` | `balanced` | `accurate` (default: `accurate`)
-- `topK` (optional): number of chunks, clamped by mode limits
+# Semantic search only
+curl "http://localhost:5003/search?q=budget+variance&limit=10"
 
-Response: `text/event-stream` with events:
-- `{"type":"status","message":"..."}` — progress message (searching/generating)
-- `{"type":"token","content":"..."}` — streamed answer tokens
-- `{"type":"citations","citations":[...]}` — source list at the end
-- `{"type":"error","message":"..."}` — on failure
-- `data: [DONE]` — stream end
-
-### GET `/search` — Semantic search
-
-```bash
-curl "http://localhost:5003/search?q=machine+learning&limit=10"
-```
-
-### POST `/index` — Index a path
-
-```bash
+# Start indexing a root directory
 curl -X POST http://localhost:5003/index \
   -H "Content-Type: application/json" \
-  -d '{"path": "/home/user/Documents", "recursive": true}'
-```
+  -d '{"path":"/home/user/Documents","recursive":true}'
 
-### DELETE `/index/:docId` — Remove a document
+# Watch/index status and failures
+curl http://localhost:5003/index/status
+curl "http://localhost:5003/index/failures?search=timeout"
 
-```bash
-curl -X DELETE http://localhost:5003/index/42
-```
-
-### GET `/docs` — List indexed documents
-
-```bash
-curl "http://localhost:5003/docs?page=1&limit=50"
-```
-
-### GET `/config` — Read config
-
-```bash
+# Read/update config
 curl http://localhost:5003/config
-```
-
-### PUT `/config` — Update config
-
-```bash
 curl -X PUT http://localhost:5003/config \
   -H "Content-Type: application/json" \
-  -d '{"chatModel": "llama3.1:8b", "topK": 8}'
-```
-
-### GET `/health` — Health check
-
-```bash
-curl http://localhost:5003/health
-# {"status":"ok","ts":1234567890}
+  -d '{"topK":6,"chunkSize":768}'
 ```
 
 [⬆ Go to TOC](#toc)
@@ -329,6 +311,27 @@ Mode profiles are enforced server-side and applied to both API and Web queries:
 | `accurate` | 4 | 8 | largest | longest answers |
 
 `topK` in requests is still respected, but clamped to mode limits.
+
+[⬆ Go to TOC](#toc)
+
+---
+
+## Runtime environment variables
+
+These are not persisted to config; they affect the current process only:
+
+| Variable | Default | Effect |
+|---|---:|---|
+| `LOCALSEARCH_INDEX_CONCURRENCY` | `4` | Concurrent embedding workers during ingest (max `8`) |
+| `LOCALSEARCH_INDEX_PROFILE` | `default` | `fast` profile uses larger chunks + lower overlap for ingest |
+| `LOCALSEARCH_STARTUP_RESCAN` | `0` (off) | Set to `1` to run startup drift scan of watched roots |
+
+Examples:
+
+```bash
+LOCALSEARCH_INDEX_PROFILE=fast LOCALSEARCH_INDEX_CONCURRENCY=6 bun run cli index /path/to/large.pdf
+LOCALSEARCH_STARTUP_RESCAN=1 bun run api
+```
 
 [⬆ Go to TOC](#toc)
 
