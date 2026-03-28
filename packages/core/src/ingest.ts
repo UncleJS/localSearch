@@ -21,6 +21,49 @@ export interface IngestResult {
   error?: string;
 }
 
+const DEFAULT_INDEX_CONCURRENCY = 4;
+const MAX_INDEX_CONCURRENCY = 8;
+const DEFAULT_INDEX_PROFILE = "default";
+const FAST_INDEX_PROFILE_CHUNK_SIZE = 1024;
+const FAST_INDEX_PROFILE_CHUNK_OVERLAP = 32;
+
+type IndexProfile = "default" | "fast";
+
+interface IngestChunking {
+  chunkSize: number;
+  chunkOverlap: number;
+}
+
+function getIndexConcurrency(): number {
+  const raw = Number(process.env.LOCALSEARCH_INDEX_CONCURRENCY ?? DEFAULT_INDEX_CONCURRENCY);
+  if (!Number.isFinite(raw) || raw < 1) return DEFAULT_INDEX_CONCURRENCY;
+  return Math.min(Math.floor(raw), MAX_INDEX_CONCURRENCY);
+}
+
+function getIndexProfile(): IndexProfile {
+  const raw = (process.env.LOCALSEARCH_INDEX_PROFILE ?? DEFAULT_INDEX_PROFILE).toLowerCase();
+  return raw === "fast" ? "fast" : "default";
+}
+
+function getIngestChunking(cfg: { chunkSize: number; chunkOverlap: number }): IngestChunking {
+  const profile = getIndexProfile();
+
+  if (profile === "fast") {
+    const chunkSize = Math.max(cfg.chunkSize, FAST_INDEX_PROFILE_CHUNK_SIZE);
+    const chunkOverlap = Math.max(
+      0,
+      Math.min(Math.min(cfg.chunkOverlap, FAST_INDEX_PROFILE_CHUNK_OVERLAP), chunkSize - 1)
+    );
+
+    return { chunkSize, chunkOverlap };
+  }
+
+  return {
+    chunkSize: Math.max(1, cfg.chunkSize),
+    chunkOverlap: Math.max(0, Math.min(cfg.chunkOverlap, Math.max(0, cfg.chunkSize - 1))),
+  };
+}
+
 const SUPPORTED_EXTENSIONS = new Set([
   ".pdf", ".docx", ".xlsx", ".odt", ".odp", ".ods",
   ".md", ".txt", ".csv", ".json",
@@ -59,10 +102,44 @@ export async function ingestFile(filePath: string): Promise<IngestResult> {
 }
 
 const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB hard limit
+const MAX_EMBED_CHARS = 6000;
+
+async function embedChunks(chunks: { text: string }[]): Promise<number[][]> {
+  if (chunks.length === 0) return [];
+
+  const concurrency = Math.min(getIndexConcurrency(), chunks.length);
+  const embeddings = new Array<number[]>(chunks.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= chunks.length) return;
+
+      const text = chunks[i].text.length > MAX_EMBED_CHARS
+        ? chunks[i].text.slice(0, MAX_EMBED_CHARS)
+        : chunks[i].text;
+
+      try {
+        embeddings[i] = await embed(text);
+      } catch (e) {
+        // If embedding fails (e.g. Ollama overloaded), keep indices aligned with a zero vector.
+        console.warn(
+          `  [embed] skipped chunk ${i + 1}/${chunks.length} (${text.length} chars): ${String(e).slice(0, 120)}`
+        );
+        embeddings[i] = new Array(768).fill(0);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  return embeddings;
+}
 
 async function _ingestFile(filePath: string): Promise<IngestResult> {
   const cfg = loadConfig();
   const db = getDb();
+  const chunking = getIngestChunking(cfg);
 
   // Size guard — skip files that are too large to process safely
   const stat = statSync(filePath);
@@ -115,29 +192,14 @@ async function _ingestFile(filePath: string): Promise<IngestResult> {
     return { path: filePath, status: "error", error: String(e) };
   }
 
-  // Chunk
-  const chunks = await chunkPagedTexts(segments, cfg.chunkSize, cfg.chunkOverlap);
+  // Chunk (profile-controlled; "fast" increases chunk size and reduces overlap)
+  const chunks = await chunkPagedTexts(segments, chunking.chunkSize, chunking.chunkOverlap);
   if (chunks.length === 0) {
     return { path: filePath, status: "error", error: "No text extracted" };
   }
 
-  // Embed all chunks — truncate to 6000 chars if too long for the model context
-  const MAX_EMBED_CHARS = 6000;
-  const embeddings: number[][] = [];
-  for (const chunk of chunks) {
-    const text = chunk.text.length > MAX_EMBED_CHARS
-      ? chunk.text.slice(0, MAX_EMBED_CHARS)
-      : chunk.text;
-    try {
-      const vec = await embed(text);
-      embeddings.push(vec);
-    } catch (e) {
-      // If embedding still fails (e.g. Ollama overloaded), skip this chunk
-      console.warn(`  [embed] skipped chunk (${text.length} chars): ${String(e).slice(0, 80)}`);
-      // push a zero vector as placeholder so indices stay aligned; chunk will be stored but won't match in KNN
-      embeddings.push(new Array(768).fill(0));
-    }
-  }
+  // Embed all chunks concurrently (bounded), preserving chunk order.
+  const embeddings = await embedChunks(chunks);
 
   // Upsert into DB (transaction)
   db.transaction(() => {

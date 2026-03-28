@@ -446,6 +446,40 @@ bun run cli config set chunkSize 256
 bun run cli index ~/Documents/subfolder
 ```
 
+### Indexing is slow on large files (e.g. big PDFs)
+
+Indexing now embeds chunks concurrently. You can tune worker concurrency (default `4`, max `8`):
+
+```bash
+# Faster indexing on capable hardware
+LOCALSEARCH_INDEX_CONCURRENCY=6 bun run cli index /path/to/large-file.pdf
+
+# Or for API-based indexing
+LOCALSEARCH_INDEX_CONCURRENCY=6 bun run api
+```
+
+If Ollama becomes unstable, lower concurrency (e.g. `2` or `3`).
+
+You can also enable a **fast indexing profile** (ingest only) that uses larger chunks and lower overlap
+to reduce total chunk count for big files:
+
+```bash
+# CLI one-off indexing with fast profile
+LOCALSEARCH_INDEX_PROFILE=fast bun run cli index /path/to/large-file.pdf
+
+# Combine profile + concurrency for max ingest throughput
+LOCALSEARCH_INDEX_PROFILE=fast LOCALSEARCH_INDEX_CONCURRENCY=6 bun run cli index /path/to/large-file.pdf
+
+# API mode
+LOCALSEARCH_INDEX_PROFILE=fast bun run api
+```
+
+Profile behavior:
+- `default`: uses config values (`chunkSize`, `chunkOverlap`)
+- `fast`: `chunkSize = max(config.chunkSize, 1024)`, `chunkOverlap = min(config.chunkOverlap, 32)`
+
+`LOCALSEARCH_INDEX_PROFILE` affects indexing/ingest only; it does not change your saved config file.
+
 ---
 
 ## Project structure
