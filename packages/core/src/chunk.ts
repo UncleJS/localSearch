@@ -21,6 +21,56 @@ export interface PagedText {
   page?: number;
 }
 
+function splitOversizedSentence(
+  sentence: string,
+  encoder: Tiktoken,
+  chunkSize: number
+): string[] {
+  const words = sentence.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+
+  const parts: string[] = [];
+  let buffer: string[] = [];
+  let bufTokens = 0;
+
+  for (const word of words) {
+    const wordTokens = encoder.encode(word).length;
+
+    // Extremely long single token-like strings: hard-split by characters.
+    if (wordTokens > chunkSize) {
+      if (buffer.length > 0) {
+        parts.push(buffer.join(" "));
+        buffer = [];
+        bufTokens = 0;
+      }
+      for (let i = 0; i < word.length; i += 500) {
+        parts.push(word.slice(i, i + 500));
+      }
+      continue;
+    }
+
+    const extra = buffer.length === 0
+      ? wordTokens
+      : encoder.encode(` ${word}`).length;
+
+    if (bufTokens + extra > chunkSize && buffer.length > 0) {
+      parts.push(buffer.join(" "));
+      buffer = [word];
+      bufTokens = wordTokens;
+      continue;
+    }
+
+    buffer.push(word);
+    bufTokens += extra;
+  }
+
+  if (buffer.length > 0) {
+    parts.push(buffer.join(" "));
+  }
+
+  return parts;
+}
+
 /**
  * Split an array of paged-text segments into token-bounded chunks.
  * Splits on sentence boundaries where possible.
@@ -45,6 +95,20 @@ export async function chunkPagedTexts(
 
     for (const sentence of sentences) {
       const tokens = encoder.encode(sentence).length;
+
+      if (tokens > chunkSize) {
+        if (buffer.length > 0) {
+          chunks.push({ text: buffer.join(" "), seq: seq++, page: seg.page });
+          buffer = [];
+          bufTokens = 0;
+        }
+
+        const parts = splitOversizedSentence(sentence, encoder, chunkSize);
+        for (const part of parts) {
+          chunks.push({ text: part, seq: seq++, page: seg.page });
+        }
+        continue;
+      }
 
       if (bufTokens + tokens > chunkSize && buffer.length > 0) {
         chunks.push({ text: buffer.join(" "), seq: seq++, page: seg.page });

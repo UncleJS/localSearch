@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG: Config = {
   chatModel: "llama3.2:3b",
   chunkSize: 512,
   chunkOverlap: 64,
-  topK: 5,
+  topK: 4,
   apiPort: 5003,
   webPort: 5002,
 };

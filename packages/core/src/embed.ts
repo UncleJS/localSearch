@@ -1,6 +1,7 @@
 import { loadConfig } from "./config";
 
-const EMBED_TIMEOUT_MS = 30_000;
+const EMBED_TIMEOUT_MS = 60_000;
+const CHAT_TIMEOUT_MS = 120_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -56,46 +57,100 @@ export async function embed(text: string): Promise<number[]> {
 export async function* chat(
   systemPrompt: string,
   userMessage: string,
-  model?: string
+  model?: string,
+  options?: {
+    numPredict?: number;
+    temperature?: number;
+  }
 ): AsyncGenerator<string> {
   const cfg = loadConfig();
-  const res = await fetch(`${cfg.ollamaUrl}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: model ?? cfg.chatModel,
-      stream: true,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-    }),
-  });
+  let res: Response;
+  try {
+    const ollamaOptions: Record<string, number> = {};
+    if (typeof options?.numPredict === "number") {
+      ollamaOptions.num_predict = options.numPredict;
+    }
+    if (typeof options?.temperature === "number") {
+      ollamaOptions.temperature = options.temperature;
+    }
+
+    res = await fetch(`${cfg.ollamaUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model ?? cfg.chatModel,
+        stream: true,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        ...(Object.keys(ollamaOptions).length > 0 ? { options: ollamaOptions } : {}),
+      }),
+      signal: AbortSignal.timeout(CHAT_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(`Ollama chat timed out after ${CHAT_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  }
 
   if (!res.ok) {
     throw new Error(`Ollama chat error ${res.status}: ${await res.text()}`);
   }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
+  if (!res.body) {
+    throw new Error("Ollama chat returned no response body");
+  }
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const lines = decoder.decode(value).split("\n").filter(Boolean);
-    for (const line of lines) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        try {
+          const json = JSON.parse(line) as {
+            message?: { content?: string };
+            done?: boolean;
+          };
+          if (json.message?.content) {
+            yield json.message.content;
+          }
+        } catch {
+          // skip malformed lines
+        }
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
       try {
-        const json = JSON.parse(line) as {
+        const json = JSON.parse(buffer) as {
           message?: { content?: string };
-          done?: boolean;
         };
         if (json.message?.content) {
           yield json.message.content;
         }
       } catch {
-        // skip malformed lines
+        // skip malformed trailing line
       }
     }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Ollama chat timed out after ${CHAT_TIMEOUT_MS}ms`);
+    }
+    throw error;
   }
 }
 

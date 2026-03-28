@@ -14,19 +14,101 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   citations?: Citation[];
+  status?: string;
 }
+
+type QueryMode = "fast" | "balanced" | "accurate";
+const QUERY_MODE_STORAGE_KEY = "localsearch.queryMode";
+
+const MODE_MAX_TOPK: Record<QueryMode, number> = {
+  fast: 4,
+  balanced: 6,
+  accurate: 8,
+};
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [topK, setTopK] = useState(5);
+  const [mode, setMode] = useState<QueryMode>("accurate");
+  const [topK, setTopK] = useState(4);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(QUERY_MODE_STORAGE_KEY);
+      if (saved === "fast" || saved === "balanced" || saved === "accurate") {
+        setMode(saved);
+      }
+    } catch {
+      // ignore storage access errors
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(QUERY_MODE_STORAGE_KEY, mode);
+    } catch {
+      // ignore storage access errors
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    const maxForMode = MODE_MAX_TOPK[mode];
+    setTopK((prev) => Math.min(prev, maxForMode));
+  }, [mode]);
+
+  function applyStreamEvent(event: {
+    type: "token" | "citations" | "error" | "status";
+    content?: string;
+    citations?: Citation[];
+    message?: string;
+  }) {
+    if (event.type === "token" && event.content) {
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content: updated[updated.length - 1].content + event.content,
+          status: undefined,
+        };
+        return updated;
+      });
+    } else if (event.type === "citations" && event.citations) {
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          citations: event.citations,
+        };
+        return updated;
+      });
+    } else if (event.type === "status") {
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          status: event.message ?? "Working...",
+        };
+        return updated;
+      });
+    } else if (event.type === "error") {
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content: event.message ?? "An error occurred.",
+          status: undefined,
+        };
+        return updated;
+      });
+    }
+  }
 
   async function sendMessage() {
     const question = input.trim();
@@ -39,14 +121,14 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, userMsg]);
 
     // Create assistant message placeholder
-    const assistantMsg: Message = { role: "assistant", content: "" };
+    const assistantMsg: Message = { role: "assistant", content: "", status: "Starting..." };
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, topK }),
+        body: JSON.stringify({ question, topK, mode }),
       });
 
       if (!res.ok || !res.body) {
@@ -55,12 +137,16 @@ export default function ChatPage() {
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const lines = decoder.decode(value).split("\n");
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
@@ -68,42 +154,31 @@ export default function ChatPage() {
 
           try {
             const event = JSON.parse(data) as {
-              type: "token" | "citations" | "error";
+              type: "token" | "citations" | "error" | "status";
               content?: string;
               citations?: Citation[];
               message?: string;
             };
-
-            if (event.type === "token" && event.content) {
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  content: updated[updated.length - 1].content + event.content,
-                };
-                return updated;
-              });
-            } else if (event.type === "citations" && event.citations) {
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  citations: event.citations,
-                };
-                return updated;
-              });
-            } else if (event.type === "error") {
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  content: event.message ?? "An error occurred.",
-                };
-                return updated;
-              });
-            }
+            applyStreamEvent(event);
           } catch {
             // skip malformed
+          }
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim().startsWith("data: ")) {
+        const data = buffer.trim().slice(6);
+        if (data !== "[DONE]") {
+          try {
+            const event = JSON.parse(data) as {
+              type: "token" | "citations" | "error" | "status";
+              content?: string;
+              citations?: Citation[];
+              message?: string;
+            };
+            applyStreamEvent(event);
+          } catch {
+            // skip malformed trailing chunk
           }
         }
       }
@@ -113,6 +188,7 @@ export default function ChatPage() {
         updated[updated.length - 1] = {
           ...updated[updated.length - 1],
           content: `Error: ${String(e)}`,
+          status: undefined,
         };
         return updated;
       });
@@ -179,7 +255,7 @@ export default function ChatPage() {
                     : "bg-surface text-foreground rounded-tl-sm border border-border"
                 }`}
               >
-                {msg.content}
+                {msg.content || msg.status}
                 {loading && i === messages.length - 1 && msg.role === "assistant" && (
                   <span className="inline-block w-2 h-4 bg-foreground-muted ml-1 animate-pulse rounded-sm" />
                 )}
@@ -223,11 +299,34 @@ export default function ChatPage() {
       {/* Input bar */}
       <div className="border-t border-border pt-4">
         <div className="flex items-center gap-2 mb-2">
+          <label className="text-xs text-foreground-muted">Mode:</label>
+          <div className="inline-flex rounded-lg border border-border overflow-hidden">
+            {([
+              ["fast", "Fast"],
+              ["balanced", "Balanced"],
+              ["accurate", "Accurate"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => setMode(value)}
+                disabled={loading}
+                className={`px-3 py-1 text-xs transition-colors ${
+                  mode === value
+                    ? "bg-accent text-white"
+                    : "bg-surface text-foreground-muted hover:text-foreground"
+                } ${loading ? "opacity-60 cursor-not-allowed" : ""}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mb-2">
           <label className="text-xs text-foreground-muted">Sources:</label>
           <input
             type="range"
             min={1}
-            max={20}
+            max={MODE_MAX_TOPK[mode]}
             value={topK}
             onChange={(e) => setTopK(Number(e.target.value))}
             className="w-24 accent-accent"

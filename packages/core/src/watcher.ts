@@ -4,6 +4,7 @@ import { getDb } from "./db";
 import { ingestFile, isSupportedFile } from "./ingest";
 
 const DEBOUNCE_MS = 5_000;
+const STARTUP_RESCAN_ENABLED = process.env.LOCALSEARCH_STARTUP_RESCAN === "1";
 
 // dir → FSWatcher
 const watchers = new Map<string, ReturnType<typeof watch>>();
@@ -151,9 +152,13 @@ export function startWatchingIndexedPaths() {
     }
     const migDirs = Array.from(seen);
     console.log(`[watcher] started watching ${migDirs.length} director${migDirs.length === 1 ? "y" : "ies"} (migrated)`);
-    scanForMissedFiles(migDirs).catch((e: unknown) =>
-      console.error("[startup-scan] unexpected error:", e)
-    );
+    if (STARTUP_RESCAN_ENABLED) {
+      scanForMissedFiles(migDirs).catch((e: unknown) =>
+        console.error("[startup-scan] unexpected error:", e)
+      );
+    } else {
+      console.log("[startup-scan] skipped (set LOCALSEARCH_STARTUP_RESCAN=1 to enable)");
+    }
     return;
   }
 
@@ -164,10 +169,14 @@ export function startWatchingIndexedPaths() {
   }
   console.log(`[watcher] started watching ${roots.length} root director${roots.length === 1 ? "y" : "ies"}`);
 
-  // Fire-and-forget background scan for files added/changed/deleted while offline
-  scanForMissedFiles(roots).catch((e: unknown) =>
-    console.error("[startup-scan] unexpected error:", e)
-  );
+  if (STARTUP_RESCAN_ENABLED) {
+    // Fire-and-forget background scan for files added/changed/deleted while offline
+    scanForMissedFiles(roots).catch((e: unknown) =>
+      console.error("[startup-scan] unexpected error:", e)
+    );
+  } else {
+    console.log("[startup-scan] skipped (set LOCALSEARCH_STARTUP_RESCAN=1 to enable)");
+  }
 }
 
 /** Recursively walk a directory and return all supported file paths. */

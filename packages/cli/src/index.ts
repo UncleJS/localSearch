@@ -20,6 +20,32 @@ const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 const RESET = "\x1b[0m";
 
+const QUERY_MAX_TOP_K = 8;
+const QUERY_MAX_CHARS_PER_CHUNK = 700;
+const QUERY_MAX_TOTAL_CONTEXT_CHARS = 2600;
+const QUERY_CHAT_NUM_PREDICT = 96;
+
+function buildPromptContext(
+  chunks: Array<{ title: string; page: number | null; text: string }>
+): string {
+  let remaining = QUERY_MAX_TOTAL_CONTEXT_CHARS;
+  const parts: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (remaining <= 0) break;
+    const c = chunks[i];
+    const limit = Math.min(QUERY_MAX_CHARS_PER_CHUNK, remaining);
+    const clipped = c.text.slice(0, limit).trim();
+    if (!clipped) continue;
+
+    const pageRef = c.page ? ` (page ${c.page})` : "";
+    parts.push(`[${i + 1}] ${c.title}${pageRef}\n${clipped}`);
+    remaining -= clipped.length;
+  }
+
+  return parts.join("\n\n---\n\n");
+}
+
 function help() {
   console.log(`
 ${BOLD}localSearch${RESET} — Local RAG document search engine
@@ -119,29 +145,33 @@ async function cmdQuery(question: string) {
   }
 
   const cfg = loadConfig();
-  const chunks = await retrieve(question, cfg.topK);
+  const effectiveTopK = Math.max(1, Math.min(cfg.topK, QUERY_MAX_TOP_K));
+  const chunks = await retrieve(question, effectiveTopK);
 
   if (chunks.length === 0) {
     console.log(`\n${YELLOW}No relevant documents found. Try indexing some documents first.${RESET}\n`);
     return;
   }
 
-  const SYSTEM_PROMPT = `You are a helpful assistant. Answer questions based ONLY on the provided document excerpts.
-For each claim, cite the source document and page number if available.
-If the answer cannot be found in the excerpts, say so clearly.`;
+  const SYSTEM_PROMPT = `Answer using ONLY the provided excerpts.
+Prioritize factual accuracy and completeness over brevity.
+When enough evidence exists, provide a clear answer in up to 5 short sentences.
+If the answer is not in the excerpts, say you do not have enough information.`;
 
-  const context = chunks
-    .map((c, i) => {
-      const pageRef = c.page ? ` (page ${c.page})` : "";
-      return `[${i + 1}] ${c.title}${pageRef}\n${c.text}`;
-    })
-    .join("\n\n---\n\n");
+  const context = buildPromptContext(chunks);
+  if (!context) {
+    console.log(`\n${YELLOW}No usable text found in retrieved chunks.${RESET}\n`);
+    return;
+  }
 
   const userMessage = `Document excerpts:\n\n${context}\n\nQuestion: ${question}`;
 
   console.log(`\n${BOLD}Answer:${RESET}\n`);
 
-  for await (const token of chat(SYSTEM_PROMPT, userMessage)) {
+  for await (const token of chat(SYSTEM_PROMPT, userMessage, undefined, {
+    numPredict: QUERY_CHAT_NUM_PREDICT,
+    temperature: 0.1,
+  })) {
     process.stdout.write(token);
   }
 

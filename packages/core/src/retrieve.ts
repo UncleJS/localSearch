@@ -22,14 +22,23 @@ interface ChunkRow {
   text: string;
 }
 
+const DEFAULT_TEXT_CHAR_LIMIT = 1600;
+
 /**
  * Hybrid retrieval: KNN vector search + BM25 FTS5, fused via Reciprocal Rank Fusion.
  */
 export async function retrieve(
   question: string,
-  topK = 5
+  topK = 5,
+  textCharLimit = DEFAULT_TEXT_CHAR_LIMIT
 ): Promise<RetrievedChunk[]> {
   const db = getDb();
+
+  const docCount = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM documents").get();
+  if (!docCount || docCount.count === 0) {
+    return [];
+  }
+
   const queryVec = await embed(question);
 
   // 1. KNN vector search (cosine similarity via sqlite-vec)
@@ -77,13 +86,13 @@ export async function retrieve(
   const ids = sorted.map(([id]) => id);
 
   const rows = db
-    .query<ChunkRow, number[]>(
-      `SELECT c.id, c.doc_id, d.path, d.title, c.page, c.text
+    .query<ChunkRow, any>(
+      `SELECT c.id, c.doc_id, d.path, d.title, c.page, substr(c.text, 1, ?) AS text
        FROM chunks c
        JOIN documents d ON d.id = c.doc_id
        WHERE c.id IN (${placeholders})`
     )
-    .all(...ids);
+    .all(textCharLimit, ...ids);
 
   // Preserve RRF order
   const idToRow = new Map<number, ChunkRow>(rows.map((r: ChunkRow) => [r.id, r] as [number, ChunkRow]));
