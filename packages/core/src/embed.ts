@@ -1,14 +1,39 @@
 import { loadConfig } from "./config";
 
+const EMBED_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 export async function embed(text: string): Promise<number[]> {
   const cfg = loadConfig();
-  const res = await fetch(`${cfg.ollamaUrl}/api/embeddings`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: cfg.embeddingModel, prompt: text }),
-  });
 
-  const rawText = await res.text();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${cfg.ollamaUrl}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: cfg.embeddingModel, prompt: text }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const rawText = await withTimeout(
+    res.text(),
+    EMBED_TIMEOUT_MS,
+    "Ollama embed body read"
+  );
 
   if (!res.ok) {
     throw new Error(`Ollama embed error ${res.status}: ${rawText.slice(0, 200)}`);

@@ -62,6 +62,36 @@ function migrate(db: Database) {
       )
   `);
 
+  // Watched directories — persisted so they survive API restarts
+  db.run(`
+    CREATE TABLE IF NOT EXISTS watched_dirs (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      path     TEXT UNIQUE NOT NULL,
+      added_at INTEGER NOT NULL
+    )
+  `);
+
+  // Failed files — persisted so failures survive restarts and are queryable
+  db.run(`
+    CREATE TABLE IF NOT EXISTS failed_files (
+      path       TEXT PRIMARY KEY,
+      error      TEXT NOT NULL,
+      failed_at  INTEGER NOT NULL
+    )
+  `);
+
+  // Migration: collapse any accumulated subdir entries down to their roots.
+  // Any row whose path starts with another row's path + '/' is redundant —
+  // the parent's recursive watcher already covers it.
+  db.run(`
+    DELETE FROM watched_dirs
+    WHERE EXISTS (
+      SELECT 1 FROM watched_dirs AS parent
+      WHERE parent.path != watched_dirs.path
+        AND watched_dirs.path LIKE parent.path || '/%'
+    )
+  `);
+
   // Triggers to keep FTS in sync
   db.run(`
     CREATE TRIGGER IF NOT EXISTS chunks_fts_insert

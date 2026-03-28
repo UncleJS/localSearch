@@ -32,18 +32,48 @@ export function isSupportedFile(filePath: string): boolean {
 
 export async function ingestFile(filePath: string): Promise<IngestResult> {
   try {
-    return await _ingestFile(filePath);
+    const result = await _ingestFile(filePath);
+    // Persist failure / clear it — single authoritative place for all callers
+    const db = getDb();
+    if (result.status === "error") {
+      db.run(
+        "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
+        [filePath, result.error ?? "Unknown error", Date.now()]
+      );
+    } else if (result.status === "indexed") {
+      db.run("DELETE FROM failed_files WHERE path = ?", [filePath]);
+    }
+    return result;
   } catch (e) {
-    return { path: filePath, status: "error", error: String(e) };
+    const error = String(e);
+    try {
+      const db = getDb();
+      db.run(
+        "INSERT OR REPLACE INTO failed_files (path, error, failed_at) VALUES (?, ?, ?)",
+        [filePath, error, Date.now()]
+      );
+    } catch { /* DB not available — ignore */ }
+    return { path: filePath, status: "error", error };
   }
 }
+
+const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB hard limit
 
 async function _ingestFile(filePath: string): Promise<IngestResult> {
   const cfg = loadConfig();
   const db = getDb();
 
-  // Hash check: skip if unchanged
+  // Size guard — skip files that are too large to process safely
   const stat = statSync(filePath);
+  if (stat.size > MAX_FILE_BYTES) {
+    return {
+      path: filePath,
+      status: "error",
+      error: `File too large to index (${(stat.size / 1024 / 1024).toFixed(1)} MB > 50 MB limit)`,
+    };
+  }
+
+  // Hash check: skip if unchanged
   const content = readFileSync(filePath);
   const hash = createHash("sha256").update(content).digest("hex");
 
@@ -110,10 +140,8 @@ async function _ingestFile(filePath: string): Promise<IngestResult> {
 
   // Upsert into DB (transaction)
   db.transaction(() => {
-    // Remove old document if re-indexing
-    if (existing) {
-      db.run("DELETE FROM documents WHERE id = ?", [existing.id]);
-    }
+    // Remove any existing rows for this path (handles duplicates from prior crashes)
+    db.run("DELETE FROM documents WHERE path = ?", [filePath]);
 
     // Insert document record
     db.run(
@@ -137,7 +165,7 @@ async function _ingestFile(filePath: string): Promise<IngestResult> {
       );
       const chunkId = db
         .query<{ id: number }, []>("SELECT last_insert_rowid() AS id")
-        .get([])!.id;
+        .get()!.id;
 
       // Store embedding as JSON array (sqlite-vec expects BLOB or JSON)
       db.run(

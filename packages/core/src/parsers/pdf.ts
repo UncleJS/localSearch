@@ -30,5 +30,11 @@ export async function parsePdf(filePath: string): Promise<PagedText[]> {
     }
   }
 
+  if (pages.length === 0) {
+    throw new Error(
+      "PDF has no extractable text (likely a scanned/image-only PDF — OCR is not supported)"
+    );
+  }
+
   return pages;
 }

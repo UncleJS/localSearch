@@ -2,6 +2,13 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
+/** Expand a leading ~/ to the real home directory — Node/Bun never does this automatically. */
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2));
+  return p;
+}
+
 export interface Config {
   defaultPath: string;
   dbPath: string;
@@ -38,7 +45,11 @@ export function loadConfig(): Config {
   }
   try {
     const raw = readFileSync(CONFIG_FILE, "utf-8");
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    const saved = JSON.parse(raw) as Partial<Config>;
+    // Expand ~ in path fields that may have been saved as tilde strings
+    if (saved.dbPath) saved.dbPath = expandHome(saved.dbPath);
+    if (saved.defaultPath) saved.defaultPath = expandHome(saved.defaultPath);
+    return { ...DEFAULT_CONFIG, ...saved };
   } catch {
     return { ...DEFAULT_CONFIG };
   }

@@ -192,7 +192,7 @@ function cmdList() {
        GROUP BY d.id
        ORDER BY d.indexed_at DESC`
     )
-    .all([]);
+    .all();
 
   if (docs.length === 0) {
     console.log(`\n${YELLOW}No documents indexed yet. Run: bun run cli index <path>${RESET}\n`);
@@ -200,7 +200,7 @@ function cmdList() {
   }
 
   console.log(`\n${BOLD}Indexed documents (${docs.length}):${RESET}\n`);
-  docs.forEach((d) => {
+  docs.forEach((d: { id: number; path: string; title: string; indexed_at: number; chunk_count: number }) => {
     const date = new Date(d.indexed_at).toISOString().slice(0, 10);
     console.log(`  ${GREEN}[${d.id}]${RESET} ${d.title} ${DIM}(${d.chunk_count} chunks, ${date})${RESET}`);
     console.log(`      ${DIM}${d.path}${RESET}`);

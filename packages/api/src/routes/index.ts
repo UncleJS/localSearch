@@ -1,7 +1,52 @@
 import { Elysia, t } from "elysia";
 import { readdirSync, statSync } from "fs";
-import { join, extname } from "path";
-import { ingestFile, isSupportedFile, getDb } from "@localsearch/core";
+import { join, dirname } from "path";
+import { ingestFile, isSupportedFile, getDb, registerDir, scanForMissedFiles } from "@localsearch/core";
+
+// ---------------------------------------------------------------------------
+// Shared indexing-status state — covers both manual POST /index and rescan
+// ---------------------------------------------------------------------------
+export interface IndexStatus {
+  running: boolean;
+  startedAt: string | null;
+  operation: "index" | "rescan" | null;
+  lastResult: string | null;
+  progress: { current: number; total: number } | null;
+  failureCount: number;
+}
+
+let _status: IndexStatus = { running: false, startedAt: null, operation: null, lastResult: null, progress: null, failureCount: 0 };
+
+export function getIndexStatus(): IndexStatus {
+  // Always read a fresh failure count from the DB
+  try {
+    const db = getDb();
+    const row = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM failed_files").get();
+    return { ..._status, failureCount: row?.n ?? 0 };
+  } catch {
+    return { ..._status };
+  }
+}
+
+export function setRunning(op: "index" | "rescan", total?: number) {
+  _status = {
+    running: true,
+    startedAt: new Date().toISOString(),
+    operation: op,
+    lastResult: null,
+    progress: total != null ? { current: 0, total } : null,
+    failureCount: _status.failureCount,
+  };
+}
+export function setProgress(current: number, total: number) {
+  if (_status.running) {
+    _status = { ..._status, progress: { current, total } };
+  }
+}
+export function setIdle(result?: string) {
+  _status = { running: false, startedAt: null, operation: null, lastResult: result ?? null, progress: null, failureCount: _status.failureCount };
+}
+
 
 function walkDir(dir: string): string[] {
   const files: string[] = [];
@@ -21,12 +66,21 @@ function walkDir(dir: string): string[] {
 }
 
 export const indexRoute = new Elysia()
+  // ── GET /index/status ──────────────────────────────────────────────────────
+  .get(
+    "/index/status",
+    () => getIndexStatus(),
+    { detail: { tags: ["index"], summary: "Get current indexing status" } }
+  )
+
+  // ── POST /index ────────────────────────────────────────────────────────────
   .post(
     "/index",
     async ({ body }) => {
+      if (_status.running) {
+        return { error: "An indexing operation is already in progress", status: getIndexStatus() };
+      }
       const { path, recursive = true } = body;
-      const results: { path: string; status: string; chunks?: number; error?: string }[] = [];
-
       let files: string[];
       try {
         const stat = statSync(path);
@@ -45,23 +99,33 @@ export const indexRoute = new Elysia()
         return { message: "No supported files found at path", path, results: [] };
       }
 
-      for (const file of files) {
-        const result = await ingestFile(file);
-        results.push(result);
-      }
+      setRunning("index", files.length);
 
-      const indexed = results.filter((r) => r.status === "indexed").length;
-      const skipped = results.filter((r) => r.status === "skipped").length;
-      const errors = results.filter((r) => r.status === "error").length;
+      // Fire-and-forget — scan runs in background so the client can disconnect/refresh freely
+      (async () => {
+        const results: { path: string; status: string; chunks?: number; error?: string }[] = [];
+        try {
+          for (let i = 0; i < files.length; i++) {
+            const result = await ingestFile(files[i]);
+            results.push(result);
+            setProgress(i + 1, files.length);
+          }
+        } finally {
+          const indexed = results.filter((r) => r.status === "indexed").length;
+          const skipped = results.filter((r) => r.status === "skipped").length;
+          const errors  = results.filter((r) => r.status === "error").length;
 
-      return {
-        message: `Indexing complete: ${indexed} indexed, ${skipped} skipped, ${errors} errors`,
-        total: files.length,
-        indexed,
-        skipped,
-        errors,
-        results,
-      };
+          // Register the root path so it is watched and survives restarts
+          const watchRoot = (() => {
+            try { return statSync(path).isDirectory() ? path : dirname(path); } catch { return null; }
+          })();
+          if (watchRoot) registerDir(watchRoot);
+
+          setIdle(`Indexing complete: ${indexed} indexed, ${skipped} skipped, ${errors} errors`);
+        }
+      })();
+
+      return { started: true, total: files.length };
     },
     {
       body: t.Object({
@@ -71,6 +135,46 @@ export const indexRoute = new Elysia()
       detail: { tags: ["index"], summary: "Index a file or directory" },
     }
   )
+
+  // ── POST /index/rescan ─────────────────────────────────────────────────────
+  .post(
+    "/index/rescan",
+    async () => {
+      if (_status.running) {
+        return { error: "An indexing operation is already in progress", status: getIndexStatus() };
+      }
+
+      setRunning("rescan");
+
+      // Fire-and-forget — rescan runs in background so the client can disconnect/refresh freely
+      (async () => {
+        try {
+          const db = getDb();
+
+          // Read the stored root dirs — no subdir expansion needed here;
+          // scanForMissedFiles does its own recursive walkDir internally.
+          const roots = db
+            .query<{ path: string }, []>("SELECT path FROM watched_dirs ORDER BY added_at")
+            .all()
+            .map((r) => (r as { path: string }).path);
+
+          // Run the scan across all roots
+          const result = await scanForMissedFiles(roots, ({ current, total }) => {
+            setProgress(current, total);
+          });
+
+          setIdle(`Rescan complete: ${result.newCount} new, ${result.updatedCount} updated, ${result.removedCount} removed, ${result.skippedCount} skipped, ${result.failed.length} failed`);
+        } catch (e) {
+          setIdle(`Rescan error: ${String(e)}`);
+        }
+      })();
+
+      return { started: true };
+    },
+    { detail: { tags: ["index"], summary: "Rescan all watched directories for new/changed/deleted files" } }
+  )
+
+  // ── DELETE /index/:docId ───────────────────────────────────────────────────
   .delete(
     "/index/:docId",
     ({ params }) => {
