@@ -9,6 +9,7 @@ A fully local, privacy-first RAG (Retrieval-Augmented Generation) document searc
 - **Fully offline** — Ollama runs locally, no cloud API keys needed
 - **Hybrid search** — Vector similarity (KNN) + BM25 keyword search, fused with Reciprocal Rank Fusion
 - **Streaming answers** — Token-by-token response with source citations
+- **Query modes** — Fast / Balanced / Accurate tradeoff per question
 - **Multi-format support** — PDF, DOCX, XLSX, ODT, ODP, ODS, Markdown, TXT, CSV
 - **Smart re-indexing** — SHA-256 hash check skips unchanged files
 - **Three interfaces** — Web UI, REST API, CLI
@@ -98,7 +99,7 @@ Config is stored at `~/.config/localsearch/config.json`:
   "chatModel": "llama3.2:3b",
   "chunkSize": 512,
   "chunkOverlap": 64,
-  "topK": 5,
+  "topK": 4,
   "apiPort": 5003,
   "webPort": 5002
 }
@@ -115,7 +116,7 @@ Config is stored at `~/.config/localsearch/config.json`:
 | `chatModel` | `llama3.2:3b` | LLM for Q&A generation |
 | `chunkSize` | `512` | Max tokens per chunk |
 | `chunkOverlap` | `64` | Token overlap between chunks |
-| `topK` | `5` | Chunks retrieved per query |
+| `topK` | `4` | Default chunks retrieved per query |
 | `apiPort` | `5003` | API server port |
 | `webPort` | `5002` | Web UI port |
 
@@ -173,9 +174,18 @@ bun run web        # http://localhost:5002
 
 - Type a natural language question and press **Enter** or click **Send**
 - Shift+Enter for multi-line questions
-- Use the **Sources** slider (1–20) to control how many document chunks are used
+- Use **Mode** to choose speed/accuracy per query:
+  - **Fast**: shortest latency, least context
+  - **Balanced**: mid-point
+  - **Accurate**: highest recall/context, slower
+- Use the **Sources** slider to control chunks per query
+  - Fast: 1–4
+  - Balanced: 1–6
+  - Accurate: 1–8
 - Answers stream token-by-token
 - Each answer shows **source citations**: file path, page number, and excerpt
+
+The selected mode is remembered in your browser (`localStorage`) across page reloads.
 
 ### Documents page (`/docs`)
 
@@ -203,10 +213,16 @@ bun run api        # http://localhost:5003
 ```bash
 curl -X POST http://localhost:5003/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the main topic?", "topK": 5}'
+  -d '{"question": "What is the main topic?", "mode": "accurate", "topK": 4}'
 ```
 
+Request body:
+- `question` (required): natural language question
+- `mode` (optional): `fast` | `balanced` | `accurate` (default: `accurate`)
+- `topK` (optional): number of chunks, clamped by mode limits
+
 Response: `text/event-stream` with events:
+- `{"type":"status","message":"..."}` — progress message (searching/generating)
 - `{"type":"token","content":"..."}` — streamed answer tokens
 - `{"type":"citations","citations":[...]}` — source list at the end
 - `{"type":"error","message":"..."}` — on failure
@@ -261,6 +277,20 @@ curl http://localhost:5003/health
 
 ---
 
+## Query modes (speed vs accuracy)
+
+Mode profiles are enforced server-side and applied to both API and Web queries:
+
+| Mode | Default topK | Max topK | Context budget | Generation budget |
+|---|---:|---:|---|---|
+| `fast` | 2 | 4 | small | shortest answers |
+| `balanced` | 3 | 6 | medium | medium answers |
+| `accurate` | 4 | 8 | largest | longest answers |
+
+`topK` in requests is still respected, but clamped to mode limits.
+
+---
+
 ## How it works
 
 ```
@@ -287,15 +317,15 @@ Documents (PDF/DOCX/XLSX/ODT/MD/TXT/CSV)
          ▼ embed question
    Ollama: nomic-embed-text
          │
-         ├──► KNN top-20 (cosine similarity, sqlite-vec)
-         ├──► BM25 top-20 (FTS5 keyword match)
+         ├──► KNN candidates (cosine similarity, sqlite-vec)
+         ├──► BM25 candidates (FTS5 keyword match)
          │
          ▼ RRF fusion
-   Reciprocal Rank Fusion → top-5 chunks
+   Reciprocal Rank Fusion → top-K chunks (mode-dependent)
          │
          ▼ build prompt
-   System: "Answer from excerpts only, cite sources"
-   User:   excerpts + question
+   System: mode profile (fast/balanced/accurate)
+   User:   bounded excerpts + question
          │
          ▼ chat (streaming)
    Ollama: llama3.2:3b → SSE token stream
@@ -395,6 +425,16 @@ bun run cli list            # find document ID
 curl -X DELETE http://localhost:5003/index/<id>
 # then re-index:
 bun run cli index <path>
+```
+
+### API starts quickly but doesn’t rescan all watched files
+
+Startup full-rescan is disabled by default for responsiveness.
+
+Enable it explicitly when needed:
+
+```bash
+LOCALSEARCH_STARTUP_RESCAN=1 bun run api
 ```
 
 ### Out of memory during indexing
