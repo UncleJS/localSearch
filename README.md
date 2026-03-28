@@ -1,6 +1,31 @@
 # localSearch
 
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+![Bun](https://img.shields.io/badge/Bun-1.3%2B-black)
+![Ollama](https://img.shields.io/badge/Ollama-Local%20LLM-5A67D8)
+![Privacy](https://img.shields.io/badge/Privacy-Local%20Only-success)
+
 A fully local, privacy-first RAG (Retrieval-Augmented Generation) document search engine. Ask natural language questions over your own documents — nothing leaves your machine.
+
+<a id="toc"></a>
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick Start (5 steps)](#quick-start-5-steps)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [CLI Usage](#cli-usage)
+- [Web UI](#web-ui)
+- [API Reference](#api-reference)
+- [Query modes (speed vs accuracy)](#query-modes-speed-vs-accuracy)
+- [How it works](#how-it-works)
+- [Supported file formats](#supported-file-formats)
+- [Running as a service](#running-as-a-service)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [License](#license)
 
 ---
 
@@ -16,6 +41,8 @@ A fully local, privacy-first RAG (Retrieval-Augmented Generation) document searc
 - **Single-file database** — `sqlite-vec` embedded in SQLite, zero infrastructure
 - **AMD GPU support** — ROCm override for Radeon 780M / RDNA3 iGPU
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## Requirements
@@ -27,6 +54,8 @@ A fully local, privacy-first RAG (Retrieval-Augmented Generation) document searc
 | [Ollama](https://ollama.com) | Latest |
 | Disk space | ~5 GB (models) + DB |
 | RAM | 8 GB minimum, 16 GB+ recommended |
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -49,6 +78,8 @@ bun run web
 # 5. Open browser
 open http://localhost:5002
 ```
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -83,6 +114,8 @@ The install script writes this to `/etc/profile.d/ollama-amd.sh` (system-wide) a
 echo $HSA_OVERRIDE_GFX_VERSION   # should print: 11.0.0
 ls /dev/kfd                       # should exist
 ```
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -128,6 +161,8 @@ bun run cli config set chatModel llama3.1:8b
 
 Or via the web UI **Settings** page at `http://localhost:5002/settings`.
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## CLI Usage
@@ -160,6 +195,8 @@ bun run cli config set defaultPath ~/Notes
 bun run cli config set chatModel llama3.1:8b
 bun run cli config set topK 10
 ```
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -197,6 +234,8 @@ The selected mode is remembered in your browser (`localStorage`) across page rel
 
 - Edit all configuration options visually
 - Changes are saved to `~/.config/localsearch/config.json`
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -275,6 +314,8 @@ curl http://localhost:5003/health
 # {"status":"ok","ts":1234567890}
 ```
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## Query modes (speed vs accuracy)
@@ -288,6 +329,8 @@ Mode profiles are enforced server-side and applied to both API and Web queries:
 | `accurate` | 4 | 8 | largest | longest answers |
 
 `topK` in requests is still respected, but clamped to mode limits.
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -334,6 +377,8 @@ Documents (PDF/DOCX/XLSX/ODT/MD/TXT/CSV)
    Answer + citations shown in UI / CLI
 ```
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## Supported file formats
@@ -346,6 +391,8 @@ Documents (PDF/DOCX/XLSX/ODT/MD/TXT/CSV)
 | `.odt`, `.odp`, `.ods` | `jszip` + XML extraction |
 | `.md`, `.txt`, `.csv` | Native string processing |
 | `.json` | Native string processing |
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -376,6 +423,8 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable --now localsearch-api
 ```
+
+[⬆ Go to TOC](#toc)
 
 ---
 
@@ -480,6 +529,8 @@ Profile behavior:
 
 `LOCALSEARCH_INDEX_PROFILE` affects indexing/ingest only; it does not change your saved config file.
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## Project structure
@@ -513,8 +564,20 @@ localSearch/
         └── src/index.ts        # index | query | search | list | reindex | config
 ```
 
+[⬆ Go to TOC](#toc)
+
 ---
 
 ## License
 
-MIT
+This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International** license.
+
+- License file: [`LICENSE.md`](./LICENSE.md)
+- Human-readable summary: https://creativecommons.org/licenses/by-nc-sa/4.0/
+- Legal code: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+[⬆ Go to TOC](#toc)
+
+---
+
+<div align="center">localSearch Documentation · Licensed under CC BY-NC-SA 4.0 · <a href="#toc">Go to TOC</a></div>
